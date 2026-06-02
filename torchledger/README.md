@@ -138,4 +138,4 @@ torchledger/
 
 ## License
 
-AGPL-3.0. Commercial licensing available — contact founders@torchledger.io
+AGPL-3.0. Commercial and government licensing available — adriansterlingblackwell@gmail.com
