@@ -1,0 +1,141 @@
+version: "3.9"
+
+services:
+  # ── Kafka (Redpanda) ─────────────────────────────────────────────
+  redpanda:
+    image: redpandadata/redpanda:v24.1.1
+    container_name: torchledger-redpanda
+    command:
+      - redpanda start
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+      - --schema-registry-addr 0.0.0.0:8081
+      - --rpc-addr redpanda:33145
+      - --advertise-rpc-addr redpanda:33145
+      - --smp 1
+      - --memory 512M
+      - --overprovisioned
+    ports:
+      - "19092:19092"
+      - "8081:8081"
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  redpanda-console:
+    image: redpandadata/console:v2.5.0
+    container_name: torchledger-console
+    depends_on: [redpanda]
+    environment:
+      CONFIG_FILEPATH: /tmp/config.yml
+    volumes:
+      - ./infra/docker/redpanda-console.yml:/tmp/config.yml
+    ports:
+      - "8080:8080"
+
+  # ── Neo4j ────────────────────────────────────────────────────────
+  neo4j:
+    image: neo4j:5.19-community
+    container_name: torchledger-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/torchledger_dev
+      NEO4J_PLUGINS: '["apoc","graph-data-science"]'
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*,gds.*"
+      NEO4J_dbms_memory_heap_initial__size: 512m
+      NEO4J_dbms_memory_heap_max__size: 1G
+    ports:
+      - "7474:7474"   # Browser
+      - "7687:7687"   # Bolt
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD", "neo4j", "status"]
+      interval: 30s
+      retries: 5
+
+  # ── ClickHouse ───────────────────────────────────────────────────
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: torchledger-clickhouse
+    environment:
+      CLICKHOUSE_USER: torchledger
+      CLICKHOUSE_PASSWORD: torchledger_dev
+      CLICKHOUSE_DB: torchledger
+    ports:
+      - "8123:8123"   # HTTP
+      - "9000:9000"   # Native
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./infra/docker/clickhouse-init.sql:/docker-entrypoint-initdb.d/init.sql
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+  # ── Redis ────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: torchledger-redis
+    command: redis-server --save 60 1 --loglevel warning
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  # ── TorchLedger API ──────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.api
+    container_name: torchledger-api
+    depends_on:
+      neo4j: { condition: service_healthy }
+      redpanda: { condition: service_healthy }
+    environment:
+      - DATABASE_URL=bolt://neo4j:torchledger_dev@neo4j:7687
+      - CLICKHOUSE_URL=clickhouse://torchledger:torchledger_dev@clickhouse:9000/torchledger
+      - REDIS_URL=redis://redis:6379/0
+      - KAFKA_BROKERS=redpanda:9092
+      - LOG_LEVEL=INFO
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./:/app
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ── Ingestion Workers ────────────────────────────────────────────
+  ingestion-evm:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.worker
+    container_name: torchledger-ingestion-evm
+    depends_on: [redpanda]
+    environment:
+      - KAFKA_BROKERS=redpanda:9092
+      - ETH_RPC_URL=${ETH_RPC_URL:-https://eth-mainnet.g.alchemy.com/v2/demo}
+      - WORKER_TYPE=evm
+    command: python -m ingestion.evm.listener
+
+  # ── Clustering Worker ────────────────────────────────────────────
+  clustering-worker:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.worker
+    container_name: torchledger-clustering
+    depends_on: [redpanda, neo4j]
+    environment:
+      - KAFKA_BROKERS=redpanda:9092
+      - DATABASE_URL=bolt://neo4j:torchledger_dev@neo4j:7687
+    command: python -m clustering.worker
+
+volumes:
+  redpanda_data:
+  neo4j_data:
+  neo4j_logs:
+  clickhouse_data:
+  redis_data:
