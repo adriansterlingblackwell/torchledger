@@ -37,8 +37,8 @@ app.include_router(address.router, prefix="/v1/address", tags=["address"])
 app.include_router(trace.router, prefix="/v1/trace", tags=["trace"])
 app.include_router(risk.router, prefix="/v1/risk", tags=["risk"])
 app.include_router(alert.router, prefix="/v1/alert", tags=["alert"])
-app.include_router(graphql_router, prefix="/graphql")
 app.include_router(vasp.router, prefix="/v1/vasp", tags=["vasp"])
+app.include_router(graphql_router, prefix="/graphql")
 
 
 @app.get("/health", tags=["ops"])
